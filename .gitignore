@@ -1,0 +1,8 @@
+/_cast_build/
+/.venv/
+*.json
+__pycache__/
+*.egg-info
+/*.mp4
+/*.mp3
+/*.pdf

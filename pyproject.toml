@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slidecast"
+version = "0.0.0"
+description = "Утилита для объединения слайдов из PDF с аудиодорожкой"
+authors = [{ name = "Nikolai Pakulin" }]
+requires-python = ">=3.12"
+
+dependencies = [
+    "PyMuPDF", # Извлечение страниц из PDF 
+    "pillow"   # обработка получившихся изображений
+    ]
+
+[project.scripts]
+slidecast = "slidecast.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
