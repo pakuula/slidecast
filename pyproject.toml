@@ -7,7 +7,7 @@ name = "slidecast"
 version = "0.0.0"
 description = "Утилита для объединения слайдов из PDF с аудиодорожкой"
 authors = [{ name = "Nikolai Pakulin" }]
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 
 dependencies = [
     "PyMuPDF", # Извлечение страниц из PDF 

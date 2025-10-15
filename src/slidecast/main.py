@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
+"""Slidecast: создание видеокаста из PDF-слайдов и аудиодорожки с таймлайном и вырезками.
+Пример использования:
+ python main.py \
+   --pdf slides.pdf \
+   --audio talk.mp3 \
+   --timeline slides.json \
+   --cuts cuts.json \
+   --out videocast.mp4 \
+   --workdir ./build \
+   --verbose"""
 # -*- coding: utf-8 -*-
 
 import argparse
-from dataclasses import dataclass
 import json
 import logging
 import os
+import subprocess
 import sys
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
-import fitz
+import pymupdf  # PyMuPDF
 from PIL import Image
-import subprocess
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -19,11 +29,18 @@ logger.setLevel(logging.INFO)
 
 @dataclass
 class SlideChange:
+    """Событие смены слайда.
+
+    t: время (секунды) на ОРИГИНАЛЬНОЙ шкале (до вырезок)
+    page: номер страницы PDF (1-based); None => по порядку
+    """
+
     t: float  # time (seconds) on ORIGINAL timeline (before cuts)
     page: Optional[int]  # 1-based PDF page number; None => sequential
 
 
 def load_json(path: str):
+    """Загрузить JSON-файл."""
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -58,8 +75,9 @@ def adjust_timeline(
     changes: List[SlideChange], cuts: List[Tuple[float, float]], audio_orig_len: float
 ) -> List[Tuple[float, int]]:
     """
-    Convert original slide changes -> adjusted (after cuts).
-    - If a change falls inside a cut interval, оно «прижимается» к началу вырезанного участка (на НОВОЙ шкале).
+    Преобразовать оригинальные изменения слайдов -> скорректированные (после вырезок).
+    - Если изменение попадает внутрь вырезанного интервала, оно «прижимается»
+      к началу вырезанного участка (на НОВОЙ шкале).
     - Удаляются дубликаты/нестрого возрастающие моменты после прижатия.
     Returns list of (t_new, page).
     """
@@ -96,13 +114,21 @@ def adjust_timeline(
     return cleaned
 
 
-def render_pdf_to_images(
-    pdf_path: str, out_dir: str, suffix: str = "png"
-) -> List[str]:
+def render_pdf_to_images(pdf_path: str, out_dir: str, suffix: str = "png") -> List[str]:
+    """Конвертировать страницы PDF в PNG-изображения в указанную директорию.
+
+    Возвращает список путей к изображениям.
+    DPI рассчитывается для высоты 720p (1280x720), с учётом реального размера страниц.
+
+    :param pdf_path: путь к PDF-файлу
+    :param out_dir: директория для сохранения изображений
+    :param suffix: расширение файлов изображений (png, jpg и т.п.)
+    :return: список путей к сгенерированным изображениям
+    """
     os.makedirs(out_dir, exist_ok=True)
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     paths = []
-    for i, page in enumerate(doc, start=1): # type: ignore
+    for i, page in enumerate(doc, start=1):  # type: ignore
         # Calculate DPI for 720p (1280x720). Assume 16:9 aspect ratio.
         # PDF page size in points (1 pt = 1/72 inch)
         rect = page.rect
@@ -113,7 +139,7 @@ def render_pdf_to_images(
         dpi = dpi_720p
         # dpi -> zoom: 72 dpi base
         zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         out_path = os.path.join(out_dir, f"slide_{i:03d}.{suffix}")
         pix.save(out_path)
@@ -179,7 +205,7 @@ def get_audio_length(audio_path: str) -> float:
         audio_path,
     ]
     result = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False
     )
     if result.returncode != 0:
         logger.error("ffprobe error: %s", result.stderr)
@@ -229,7 +255,10 @@ def build_fragmenting_script(
     return "\n".join(script_lines)
 
 
-def cuts_to_fragments(cuts, audio_orig_len):
+def cuts_to_fragments(
+    cuts: List[Tuple[float, float]], audio_orig_len: float
+) -> List[Tuple[float, float]]:
+    """Преобразует список удаляемых фрагментов в список сохраняемых фрагментов."""
     fragments = []
     start = 0.0
     for s, e in cuts:
@@ -243,7 +272,22 @@ def cuts_to_fragments(cuts, audio_orig_len):
     return fragments
 
 
-def cut_paste_audio_script(source_audio, fragments, audio_file, workdir):
+def cut_paste_audio_script(
+    source_audio: str,
+    fragments: List[Tuple[float, float]],
+    audio_file: str,
+    workdir: str,
+) -> str:
+    """Создаёт скрипт для вырезки и склейки аудио-фрагментов.
+    Возвращает путь к скрипту.
+    
+    :param source_audio: путь к исходному аудиофайлу
+    :param fragments: список (start, end) фрагментов для сохранения
+    :param audio_file: путь к результирующему аудиофайлу
+    :param workdir: рабочая директория для временных файлов
+    :return: путь к созданному скрипту
+    """
+
     audio_dir = os.path.dirname(audio_file)
     os.makedirs(workdir, exist_ok=True)
     cleaning_script = build_fragmenting_script(
@@ -263,16 +307,20 @@ def build_video_script(
     changes: List[Tuple[float, int]],
     target: str,
     workdir: str,
-    fps: int = 30,
+    fps: int = 30,  # pylint: disable=unused-argument
 ) -> str:
     """
-    Builds a shell script to create a video from slide images and audio using ffmpeg.
-    - audio_path: path to the audio file
-    - slide_images: list of paths to slide images
-    - changes: list of (time, page) tuples indicating when to switch slides
-    - target: output video file path
-    - fps: frames per second for the output video
+    Создаёт скрипт для создания видео из изображений слайдов и аудио с помощью ffmpeg.
+    Возвращает текст скрипта.
+    :param audio_path: путь к аудиофайлу
+    :param slide_images: список путей к изображениям слайдов
+    :param changes: список кортежей (время, страница) для переключения слайдов
+    :param target: путь к выходному видеофайлу
+    :param workdir: рабочая директория для временных файлов
+    :param fps: количество кадров в секунду для выходного видео (не используется)
+    :return: текст скрипта
     """
+
     script_lines = ["#!/bin/bash", "set -e", ""]
 
     # Create a temporary directory for intermediate files
@@ -282,7 +330,6 @@ def build_video_script(
     # Create a text file listing the images and their durations
     img_list_path = os.path.join(temp_dir, "img_list.txt")
     with open(img_list_path, "w", encoding="utf-8") as f:
-        last_time = 0.0
         if changes and changes[0][0] > 0:
             # Initial duration before first change
             f.write(f"file '{slide_images[0]}'\n")
@@ -308,23 +355,26 @@ def build_video_script(
             if final_page >= 1 and final_page <= len(slide_images):
                 f.write(f"file '{slide_images[final_page-1]}'\n")
     logger.debug("Image list file for ffmpeg created at: %s", img_list_path)
-    logger.debug("Image list for ffmpeg:\n%s", open(img_list_path).read())
-    script_lines.append(f"echo 'Creating video from images...'")
+    logger.debug(
+        "Image list for ffmpeg:\n%s", open(img_list_path, "r", encoding="utf-8").read()
+    )
+    script_lines.append("echo 'Creating video from images...'")
     script_lines.append(
-        # f"ffmpeg -y -f concat -safe 0 -i '{img_list_path}' -vsync vfr -pix_fmt yuv420p -r {fps} '{os.path.join(temp_dir, 'video_no_audio.mp4')}'"
+        # f"ffmpeg -y -f concat -safe 0 -i '{img_list_path}' -vsync vfr -pix_fmt yuv420p -r {fps} '{os.path.join(temp_dir, 'video_no_audio.mp4')}'" # pylint: disable=line-too-long
         f"ffmpeg -y -f concat -safe 0 -i '{img_list_path}'"
         # f" -vf 'pad=ceil(iw/2)*2:ceil(ih/2)*2' -pix_fmt yuv420p"
         # f" -r {fps}"
         # f"  -vsync vfr"
         " -r 1"
-        " -c:v libx264 -preset ultrafast -crf 28 -g 300 -sc_threshold 0 -x264-params 'keyint=300:min-keyint=300:no-scenecut=1'"
+        " -c:v libx264 -preset ultrafast -crf 28 -g 300 -sc_threshold 0 -x264-params 'keyint=300:min-keyint=300:no-scenecut=1'"  # pylint: disable=line-too-long
         " -threads 0"
         f" '{os.path.join(temp_dir, 'video_no_audio.mp4')}'"
     )
     script_lines.append("")
-    script_lines.append(f"echo 'Merging video with audio...'")
+    script_lines.append("echo 'Merging video with audio...'")
     script_lines.append(
-        f"ffmpeg -y -i '{os.path.join(temp_dir, 'video_no_audio.mp4')}' -i '{audio_path}' -c:v copy -c:a copy '{target}'"
+        f"ffmpeg -y -i '{os.path.join(temp_dir, 'video_no_audio.mp4')}' "
+        f"-i '{audio_path}' -c:v copy -c:a copy '{target}'"
     )
     script_lines.append("")
     return "\n".join(script_lines)
@@ -337,41 +387,68 @@ def run_script(script_path: str, verbose: bool = False):
         stdout=sys.stdout if verbose else subprocess.PIPE,
         stderr=sys.stderr if verbose else subprocess.PIPE,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
-        logger.error("Script %s failed with error: %s\nLog: %s", script_path, result.stderr, result.stdout)
+        logger.error(
+            "Script %s failed with error: %s\nLog: %s",
+            script_path,
+            result.stderr,
+            result.stdout,
+        )
         raise RuntimeError(f"Script {script_path} failed")
     logger.info("Script %s executed successfully.", script_path)
     logger.debug("Script output: %s", result.stdout)
 
 
 def main():
+    """Главная функция.
+
+    Выполняет разбор аргументов, проверяет наличие файлов, загружает таймлайн и вырезки,
+    преобразует PDF в PNG, генерирует и выполняет скрипты для удаления фрагментов из аудио
+    и наложения изображений слайдов на аудио"""
+    
+    # 1) Разбор аргументов
     ap = argparse.ArgumentParser(
         description="Создание видеокаста: PDF-слайды + аудио + таймлайн + вырезки."
     )
     ap.add_argument("-p", "--pdf", required=True, help="Путь к PDF со слайдами")
-    ap.add_argument("-a","--audio", required=True, help="Путь к исходному аудио")
+    ap.add_argument("-a", "--audio", required=True, help="Путь к исходному аудио")
     ap.add_argument(
-        "-t", "--timeline", required=True, 
-        help=("JSON-файл с метками времени переключения слайдов "
-              " (формат: [12.3, 45.0, ...] или [{\"t\":12.3,\"page\":2}, ...])")
+        "-t",
+        "--timeline",
+        required=True,
+        help=(
+            "JSON-файл с метками времени переключения слайдов "
+            ' (формат: [12.3, 45.0, ...] или [{"t":12.3,"page":2}, ...])'
+        ),
     )
     ap.add_argument(
-        "-c", "--cuts",
+        "--skew", type=float, default=0.0, help="Смещение всех меток времени (секунды)"
+    )
+    ap.add_argument(
+        "-c",
+        "--cuts",
         required=False,
         default=None,
         help="JSON-файл с вырезаемыми интервалами [[start,end], ...]",
     )
     ap.add_argument("-o", "--out", required=True, help="Путь к финальному видео .mp4")
     ap.add_argument(
-        "-w", "--workdir",
+        "-w",
+        "--workdir",
         default="./_cast_build",
         help="Рабочая директория (кэш изображений, очищенное аудио и т.п.)",
     )
     ap.add_argument(
-        "--dpi", type=int, default=200, help="DPI рендера PDF в изображения (не используется)"
+        "--dpi",
+        type=int,
+        default=200,
+        help="DPI рендера PDF в изображения (не используется)",
     )
-    ap.add_argument("--fps", type=int, default=30, help="FPS выходного видео (не используется)")
+    ap.add_argument(
+        "--fps", type=int, default=30, help="FPS выходного видео (не используется)"
+    )
     ap.add_argument("-v", "--verbose", action="store_true", help="Подробный вывод")
     ap.add_argument(
         "--dry-run",
@@ -393,9 +470,14 @@ def main():
 
     if args.verbose:
         logger.setLevel(logging.DEBUG)
-        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s:%(levelname)s:%(name)s: %(message)s")
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s:%(levelname)s:%(name)s: %(message)s",
+        )
     else:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(name)s: %(message)s")
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s:%(levelname)s:%(name)s: %(message)s"
+        )
 
     args.audio = os.path.abspath(args.audio)
     if not os.path.isfile(args.audio):
@@ -429,6 +511,10 @@ def main():
     timeline_raw = load_json(args.timeline)
     logger.debug("Таймлайн (сырой): %s", timeline_raw)
     changes = parse_timeline(timeline_raw)
+    if args.skew != 0.0:
+        for ch in changes:
+            ch.t += args.skew
+    changes.sort(key=lambda x: x.t)
     logger.info("Таймлайн загружен: %d слайдов", len(changes))
 
     # 3) Загрузка и нормализация вырезок
@@ -437,6 +523,12 @@ def main():
         cuts_json = load_json(args.cuts)
         cuts = [(parse_time_label(a), parse_time_label(b)) for a, b in cuts_json]
         cuts = normalize_cuts(cuts)
+    if args.skew != 0.0:
+
+        def map_cut(cut):
+            return (cut[0] + args.skew, cut[1] + args.skew)
+
+        cuts = list(map(map_cut, cuts))
     logger.info("Вырезки загружены: %d интервалов", len(cuts))
     logger.debug("Вырезки: %s", cuts)
     logger.debug("Получаем длину аудио...")
@@ -459,7 +551,9 @@ def main():
             cleaning_script_path = cut_paste_audio_script(
                 args.audio, fragments, audio_file, audio_dir
             )
-            logger.info("Выполняется скрипт для очистки аудио: %s", cleaning_script_path)
+            logger.info(
+                "Выполняется скрипт для очистки аудио: %s", cleaning_script_path
+            )
             if not args.dry_run:
                 run_script(cleaning_script_path, args.verbose)
     else:
@@ -493,13 +587,20 @@ def main():
             )
         else:
             slide_imgs = render_pdf_to_images(args.pdf, slides_dir)
-            logger.info("Слайды обработаны: %d страниц, каталог %s", len(slide_imgs), slides_dir)
+            logger.info(
+                "Слайды обработаны: %d страниц, каталог %s", len(slide_imgs), slides_dir
+            )
         logger.debug("Слайды: %s", slide_imgs)
     else:
         # dry run
-        slide_imgs = [os.path.join(slides_dir, f'slide_{i:03d}.png') for i in range(1, len(timeline_raw))]
-        logger.info("Dry run: слайды не рендерятся, предполагается %d страниц", len(slide_imgs))
-        
+        slide_imgs = [
+            os.path.join(slides_dir, f"slide_{i:03d}.png")
+            for i in range(1, len(timeline_raw))
+        ]
+        logger.info(
+            "Dry run: слайды не рендерятся, предполагается %d страниц", len(slide_imgs)
+        )
+
     # 6) создание скрипта для объединения слайдов с аудиодорожкой
     video_dir = os.path.join(args.workdir, "video")
     os.makedirs(video_dir, exist_ok=True)
@@ -533,5 +634,5 @@ if __name__ == "__main__":
     #   --cuts cuts.json \
     #   --out videocast.mp4 \
     #   --workdir ./build \
-    #   --verbose 
+    #   --verbose
     main()
