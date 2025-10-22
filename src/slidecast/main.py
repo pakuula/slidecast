@@ -280,7 +280,7 @@ def cut_paste_audio_script(
 ) -> str:
     """Создаёт скрипт для вырезки и склейки аудио-фрагментов.
     Возвращает путь к скрипту.
-    
+
     :param source_audio: путь к исходному аудиофайлу
     :param fragments: список (start, end) фрагментов для сохранения
     :param audio_file: путь к результирующему аудиофайлу
@@ -407,7 +407,7 @@ def main():
     Выполняет разбор аргументов, проверяет наличие файлов, загружает таймлайн и вырезки,
     преобразует PDF в PNG, генерирует и выполняет скрипты для удаления фрагментов из аудио
     и наложения изображений слайдов на аудио"""
-    
+
     # 1) Разбор аргументов
     ap = argparse.ArgumentParser(
         description="Создание видеокаста: PDF-слайды + аудио + таймлайн + вырезки."
@@ -573,6 +573,7 @@ def main():
     logger.debug("Позиции слайдов после корректировки: %s", adjusted_changes)
 
     # 5) Рендер PDF в изображения
+    logger.info("Запускается обработка слайдов: %s", args.pdf)
     slides_dir = os.path.join(args.workdir, "slides")
     os.makedirs(slides_dir, exist_ok=True)
     if not args.dry_run:
